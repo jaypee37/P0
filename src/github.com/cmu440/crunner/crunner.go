@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net"
+	
 )
 
 const (
@@ -15,5 +17,15 @@ const (
 // read and print out the server's echoed response to standard output. Whether or
 // not you add any code to this file will not affect your grade.
 func main() {
-	fmt.Println("Not implemented.")
+	conn, err := net.Dial("tcp", "localhost:9999")
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	var s string = "Put:Key:Hello"
+
+	bs :=[]byte(s)
+	conn.Write(bs)
+	// fmt.Fprintf(conn, "Get:Key\n")
+	// _, _ := bufio.NewReader(conn).ReadString('\n')
 }
