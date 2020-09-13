@@ -14,17 +14,18 @@ import (
 type keyValueServer struct {
 	// TODO: implement this!
 	db kvstore.KVStore
+	ln net.Listener
 	connections map[int]connection
 }
 
 type connection struct {
-	buffer chan []byte
+	response chan []([]byte)
 	conn net.Conn
 }
 
 type Request_ struct {
 	payload []string
-	port int
+	id int
 }
 
 // New creates and returns (but does not start) a new KeyValueServer.
@@ -47,27 +48,32 @@ func (kvs *keyValueServer) Start(port int) error {
 	fmt.Println(port_buffer.String())
 
 	// start server
+	id := 0
 	ln, err := net.Listen("tcp", port_buffer.String())
 	if err != nil {
 		return err
 	}
 
 	input_buffer := make(chan Request_)
+	kvs.ln = ln
 	go handleCommand(kvs,input_buffer)    
 
 	for {
 		// accept and handle client connections
+		fmt.Println("listensing")
 		conn, err := ln.Accept()
+		fmt.Println("Aceepted")
 		if err != nil {
 			// handle error
 			fmt.Println(err)
 			return err
 		}
 		//document connection and handle client
-		result_buffer := make(chan []byte)
-		connection := connection{buffer:result_buffer,conn:conn}
- 		kvs.connections[port] = connection
-		go handleConnection(kvs,port,input_buffer)      
+		result_buffer := make(chan []([]byte))
+		connection := connection{response:result_buffer,conn:conn}
+ 		kvs.connections[id] = connection
+		go handleConnection(kvs,id,input_buffer)    
+		id ++  
 	}
 	return nil
 }
@@ -78,6 +84,7 @@ func (kvs *keyValueServer) Close() {
 	for _,conn := range kvs.connections {
 		conn.conn.Close()
 	}
+	kvs.ln.Close()
 }
 
 func (kvs *keyValueServer) CountActive() int {
@@ -92,7 +99,7 @@ func (kvs *keyValueServer) CountDropped() int {
 
 
 func dropCR(data []byte) []byte {
-	if len(data) > 0 && data[len(data)-1] == '\r' {
+	if len(data) > 0 && data[len(data)-1] == '\n' {
 		return data[0 : len(data)-1]
 	}
 	return data
@@ -117,11 +124,11 @@ func SplitColon(data []byte, atEOF bool) (advance int, token []byte, err error) 
 
 }
 
-func handleConnection(kvs *keyValueServer,port int, input_buffer chan Request_) {
+func handleConnection(kvs *keyValueServer,id int, input_buffer chan Request_) {
 
 	// for or select to wait for result buffer to be filled
 	fmt.Println("handling connection")
-	connection := kvs.connections[port]
+	connection := kvs.connections[id]
 	scanner := bufio.NewScanner(connection.conn)
 	scanner.Split(SplitColon)
 
@@ -132,24 +139,31 @@ func handleConnection(kvs *keyValueServer,port int, input_buffer chan Request_) 
 		input = append(input,word)
 	}
 
-	fmt.Println("here is request",input)
-	var request  Request_ = Request_{input,port}
+	if len(input) < 1 {
+		return
+	}
+	var request  Request_ = Request_{input,id}
 	input_buffer <- request
+	fmt.Println("Put request on channel",input)
 
 	for {
 		select{
-		case <- connection.buffer:
-			fmt.Println("write response")
-			er := connection.conn.Close()
+		case response := <- connection.response:
+			fmt.Println("writing response for request",request,response)
 
-			if er != nil {
-				fmt.Println(er)
-				return
+			for _,res := range response {
+				connection.conn.Write(res)
 			}
-			
-			fmt.Println(er)
-			fmt.Printf("closed connection on port %d\n",port)
 			return
+			// er := connection.conn.Close()
+
+			// if er != nil {
+			// 	fmt.Println(er)
+				
+			// }
+			
+			// fmt.Println(er)
+			// fmt.Printf("closed connection on port %d\n",port)
 		}
 	}
 	
@@ -159,38 +173,45 @@ func handleCommand(kvs *keyValueServer,input_buffer chan Request_){
 
 	for {
 		request := <- input_buffer
+		fmt.Println("Took request off channel", request.payload)
 
 		command := request.payload
-		port := request.port
-		fmt.Println("here is command", command)
+		id := request.id
 
-		connection := kvs.connections[port]
-		response_buffer := connection.buffer
+		connection := kvs.connections[id]
+		response_buffer := connection.response
+		var data []([]byte)
 
-		response_buffer <- make([]byte,10)
-
-
-		//add modify db channel
-		// switch word {
-		// 	case "Put":
-		// 		HandlePut(kvs,input[1],input[2])
-		// 	case "Get":
-		// 		HandlePut(kvs,input[1],input[2])
-		// 	case "Delete":
-		// 		HandlePut(kvs,input[1],input[2])	
-		// 	}
-
-		}
+		// add modify db channel
+		switch command[0] {
+			case "Put":
+				val := []byte(command[2])
+				data = HandlePut(kvs,command[1],val)
+			case "Get":
+				data = HandleGet(kvs,command[1])
+			case "Delete":
+				data = HandleDelete(kvs,command[1])	
+			}
+		
+		response_buffer <- data
+	}
 }
 
-// func HandlePut(key string,value []byte){
+func HandlePut(kvs *keyValueServer, key string,value []byte) []([]byte){
 
-// }
+	kvs.db.Put(key,value)
+	return nil
 
-// func HandleGet(key string){
+}
 
-// }
+func HandleGet(kvs *keyValueServer,key string) []([]byte){
+	
+	data := kvs.db.Get(key)
+	return data
+}
 
-// func HandleDelete(key string){
+func HandleDelete(kvs *keyValueServer,key string) []([]byte){
 
-// }
+	kvs.db.Clear(key)
+	return nil
+}
