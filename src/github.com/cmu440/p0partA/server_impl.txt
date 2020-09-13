@@ -1,0 +1,279 @@
+// Implementation of a KeyValueServer. Students should write their code in this file.
+
+package p0partA
+
+import (
+	"github.com/cmu440/p0partA/kvstore";
+	"fmt";
+	"net";
+	"strconv";
+	// "bufio";
+	"bytes";
+	"strings"
+)
+
+type keyValueServer struct {
+	// TODO: implement this!
+	db kvstore.KVStore
+	ln net.Listener
+	connections map[int]connection
+	dropped_chan chan int
+	dropped int
+	active int
+}
+
+type connection struct {
+	response chan []([]byte)
+	finished chan bool
+	conn net.Conn
+}
+
+type Request_ struct {
+	payload []string
+	id int
+}
+
+// New creates and returns (but does not start) a new KeyValueServer.
+func New(store kvstore.KVStore) KeyValueServer {
+	// TODO: implement this!
+	connections := make(map[int]connection)
+	drop_chan := make(chan int)
+	server := &keyValueServer{db : store,connections: connections, dropped_chan: drop_chan}
+	return server
+}
+
+func (kvs *keyValueServer) Start(port int) error {
+	go StartListening(kvs,port)
+	return nil
+}
+
+func StartListening (kvs *keyValueServer, port int) error {
+	// parse port string
+	var port_buffer bytes.Buffer
+	port_str := strconv.Itoa(port)
+
+	port_buffer.WriteString(":")
+	port_buffer.WriteString(port_str)
+
+	fmt.Println(port_buffer.String())
+
+	// start server
+	id := 0
+	ln, err := net.Listen("tcp", port_buffer.String())
+	if err != nil {
+		return err
+	}
+
+	// buffer to hold each client request
+	input_buffer := make(chan Request_)
+	kvs.ln = ln
+	go handleCommand(kvs,input_buffer)  
+	go HandleDropped(kvs)  
+
+	for {
+		// accept and handle client connections
+		conn, err := ln.Accept()
+		fmt.Println("Aceepted")
+		if err != nil {
+			// handle error
+			fmt.Println(err)
+			return err
+		}
+		//document connection and handle client
+		result_buffer := make(chan []([]byte))
+		finished_chan := make(chan bool)
+		connection := connection{response:result_buffer,conn:conn,finished:finished_chan}
+		kvs.active ++
+ 		kvs.connections[id] = connection
+		go handleConnection(kvs,id,input_buffer)    
+		id ++  
+	}
+	return nil
+}
+func (kvs *keyValueServer) Close() {
+	// TODO: implement this!
+	fmt.Println("closing",len(kvs.connections))
+	for id,conn := range kvs.connections {
+
+		select {
+		case <- conn.finished: 
+		er := conn.conn.Close()
+		if er != nil{
+			fmt.Println(er)
+		}
+		fmt.Println("closed connection",id)
+		close(conn.response)
+		}
+		
+	}
+	close(kvs.dropped_chan)
+	kvs.ln.Close()
+}
+
+func (kvs *keyValueServer) CountActive() int {
+	connections := kvs.connections
+	count := 0
+
+	for  range connections {
+		count ++
+	}
+	return count
+}
+
+func (kvs *keyValueServer) CountDropped() int {
+	// TODO: implement this!
+	return kvs.dropped
+}
+
+
+func dropCR(data []byte) []byte {
+	if len(data) > 0 && data[len(data)-1] == '\n' {
+		return data[0 : len(data)-1]
+	}
+	return data
+}
+
+// TODO: add additional methods/functions below!
+func SplitColon(data []byte, atEOF bool) (advance int, token []byte, err error) {
+
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	if i := bytes.IndexByte(data, ':'); i >= 0 {
+		// We have a full newline-terminated line.
+		return i + 1, dropCR(data[0:i]), nil
+	}
+	// If we're at EOF, we have a final, non-terminated line. Return it.
+	if atEOF {
+		return len(data), dropCR(data), nil
+	}
+	// Request more data.
+	return 0, nil, nil
+
+}
+
+func HandleDropped(kvs *keyValueServer) {
+	for {
+		select {
+		case <- kvs.dropped_chan:
+			kvs.dropped ++
+			kvs.active --
+		}
+	}
+}
+
+func ClientRead(kvs *keyValueServer,id int, input_buffer chan Request_) {
+	
+}
+
+func handleConnection(kvs *keyValueServer,id int, input_buffer chan Request_) {
+
+	connection := kvs.connections[id]
+
+	b := make([]byte,2048)
+	connection.conn.Read(b)
+
+	if i := bytes.IndexByte(b, '\n'); i >= 0 {
+		// We have a full newline-terminated line.
+		b = b[0:i]
+	}
+
+	s:= string(b)
+	input := strings.Split(s,":")
+	// fmt.Println(c)
+
+	// scanner := bufio.NewScanner(connection.conn)
+	// scanner.Split(SplitColon)
+
+	// fmt.Println("scanning")
+	// input := make([]string,0)
+	// for scanner.Scan() {
+		
+	// 	word := scanner.Text()
+	// 	fmt.Println(word)
+	// 	input = append(input,word)
+	// }
+	fmt.Println(input)
+
+	if len(input) < 1 {
+		return
+	}
+	var request  Request_ = Request_{input,id}
+	input_buffer <- request
+	fmt.Println("added to buffer")
+
+	//wait for 'handleCommand' Thread to put db response on connection channel
+	for {
+		select{
+		case response := <- connection.response:
+			fmt.Println("connection sees response",request,response)
+
+			if len(response) > 0 {
+				for i,res := range response {
+
+					s := string(res)
+					fmt.Println("res",i,s)
+
+					res = append(res,byte('\n'))
+					_,er := connection.conn.Write(res)
+					if er != nil {
+						fmt.Println(er)
+					}
+				}
+			} 
+			
+			kvs.dropped_chan <- 1
+			connection.finished <- true
+			return
+		}
+	}
+	
+} 
+
+func handleCommand(kvs *keyValueServer,input_buffer chan Request_){
+
+	for {
+		request := <- input_buffer
+		fmt.Println("picked off buffer")
+
+		command := request.payload
+		id := request.id
+
+		connection := kvs.connections[id]
+		response_buffer := connection.response
+		var data []([]byte)
+
+		// add modify db channel
+		switch command[0] {
+			case "Put":
+				val := []byte(command[2])
+				data = HandlePut(kvs,command[1],val)
+			case "Get":
+				data = HandleGet(kvs,command[1])
+			case "Delete":
+				data = HandleDelete(kvs,command[1])	
+			}
+		
+		response_buffer <- data
+		fmt.Println("signaled connection")
+	}
+}
+
+func HandlePut(kvs *keyValueServer, key string,value []byte) []([]byte){
+
+	kvs.db.Put(key,value)
+	return nil
+
+}
+
+func HandleGet(kvs *keyValueServer,key string) []([]byte){
+	
+	data := kvs.db.Get(key)
+	return data
+}
+
+func HandleDelete(kvs *keyValueServer,key string) []([]byte){
+
+	kvs.db.Clear(key)
+	return nil
+}
