@@ -8,7 +8,9 @@ import (
 	"net";
 	"strconv";
 	"bufio";
+	// "io"
 	"bytes";
+	"strings"
 )
 
 type keyValueServer struct {
@@ -16,10 +18,19 @@ type keyValueServer struct {
 	db kvstore.KVStore
 	ln net.Listener
 	connections map[int]connection
+	dropped_chan chan int
+	dropped int
+	active int
 }
 
+type Response struct {
+	key string
+	values []([]byte)
+}
 type connection struct {
-	response chan []([]byte)
+	response chan Response
+	close_conn bool
+	finished chan bool
 	conn net.Conn
 }
 
@@ -32,20 +43,23 @@ type Request_ struct {
 func New(store kvstore.KVStore) KeyValueServer {
 	// TODO: implement this!
 	connections := make(map[int]connection)
-	server := &keyValueServer{db : store,connections: connections}
+	drop_chan := make(chan int)
+	server := &keyValueServer{db : store,connections: connections, dropped_chan: drop_chan}
 	return server
 }
 
 func (kvs *keyValueServer) Start(port int) error {
+	go StartListening(kvs,port)
+	return nil
+}
 
+func StartListening (kvs *keyValueServer, port int) error {
 	// parse port string
 	var port_buffer bytes.Buffer
 	port_str := strconv.Itoa(port)
 
 	port_buffer.WriteString(":")
 	port_buffer.WriteString(port_str)
-
-	fmt.Println(port_buffer.String())
 
 	// start server
 	id := 0
@@ -54,47 +68,62 @@ func (kvs *keyValueServer) Start(port int) error {
 		return err
 	}
 
+	// buffer to hold each client request
 	input_buffer := make(chan Request_)
 	kvs.ln = ln
-	go handleCommand(kvs,input_buffer)    
+	go handleCommand(kvs,input_buffer)  
+	go HandleDropped(kvs)  
 
 	for {
 		// accept and handle client connections
-		fmt.Println("listensing")
 		conn, err := ln.Accept()
-		fmt.Println("Aceepted")
 		if err != nil {
 			// handle error
 			fmt.Println(err)
 			return err
 		}
 		//document connection and handle client
-		result_buffer := make(chan []([]byte))
-		connection := connection{response:result_buffer,conn:conn}
+		result_buffer := make(chan Response)
+		finished_chan := make(chan bool)
+		connection := connection{response:result_buffer,conn:conn,finished:finished_chan,close_conn: false}
+		kvs.active ++
  		kvs.connections[id] = connection
 		go handleConnection(kvs,id,input_buffer)    
 		id ++  
 	}
 	return nil
 }
-
 func (kvs *keyValueServer) Close() {
 	// TODO: implement this!
-
 	for _,conn := range kvs.connections {
-		conn.conn.Close()
+
+		// select {
+		// case <- conn.finished: 
+		er := conn.conn.Close()
+		if er != nil{
+			fmt.Println(er)
+		}
+		close(conn.response)
+		// }
+		
 	}
+	close(kvs.dropped_chan)
 	kvs.ln.Close()
 }
 
 func (kvs *keyValueServer) CountActive() int {
-	// TODO: implement this!
-	return -1
+	connections := kvs.connections
+	count := 0
+
+	for  range connections {
+		count ++
+	}
+	return count
 }
 
 func (kvs *keyValueServer) CountDropped() int {
 	// TODO: implement this!
-	return -1
+	return kvs.dropped
 }
 
 
@@ -124,56 +153,91 @@ func SplitColon(data []byte, atEOF bool) (advance int, token []byte, err error) 
 
 }
 
-func handleConnection(kvs *keyValueServer,id int, input_buffer chan Request_) {
+func HandleDropped(kvs *keyValueServer) {
+	for {
+		select {
+		case <- kvs.dropped_chan:
+			kvs.dropped ++
+			kvs.active --
+		}
+	}
+}
 
-	// for or select to wait for result buffer to be filled
-	fmt.Println("handling connection")
+func ClientRead(kvs *keyValueServer,id int, input_buffer chan Request_) {
+
 	connection := kvs.connections[id]
-	scanner := bufio.NewScanner(connection.conn)
-	scanner.Split(SplitColon)
+	reader := bufio.NewReader(connection.conn)
+	count := 0
+	for {
 
-	input := make([]string,0)
-	for scanner.Scan() {
+		b,er := reader.ReadBytes(byte('\n'))
+		count++
 
-		word := scanner.Text()
-		input = append(input,word)
+		if er != nil {
+			break
+		}
+		
+		str := string(b[0:len(b)-1])
+		input := strings.Split(str,":")
+		// fmt.Println(str)
+
+		if len(input) > 0 {
+			
+		var request  Request_ = Request_{input,id}
+		input_buffer <- request
+		}
 	}
+	fmt.Printf("Read %d requests from client\n",count)
 
-	if len(input) < 1 {
-		return
-	}
-	var request  Request_ = Request_{input,id}
-	input_buffer <- request
-	fmt.Println("Put request on channel",input)
+}
 
+func ClientWrite(kvs *keyValueServer,id int, input_buffer chan Request_) {
+	
+	//wait for 'handleCommand' Thread to put db response on connection channel
+	connection := kvs.connections[id]
 	for {
 		select{
 		case response := <- connection.response:
-			fmt.Println("writing response for request",request,response)
-
-			for _,res := range response {
-				connection.conn.Write(res)
+			if response.values == nil {
+				// kvs.dropped_chan <- 1
+				// connection.finished <- true
+				return
 			}
-			return
-			// er := connection.conn.Close()
+			if len(response.values) > 0 {
+				for _,res := range response.values {
+					
+					val := string(res)
+					msg := response.key + ":" + val + "\n"
 
-			// if er != nil {
-			// 	fmt.Println(er)
-				
-			// }
+					// fmt.Println(msg,[]byte(msg))
+					_,er := connection.conn.Write([]byte(msg))
+					if er != nil {
+
+						fmt.Println("error writeing",er)
+					}
+				}
+			} 
 			
-			// fmt.Println(er)
-			// fmt.Printf("closed connection on port %d\n",port)
+			
 		}
 	}
-	
+}
+
+func handleConnection(kvs *keyValueServer,id int, input_buffer chan Request_) {
+
+	connection := kvs.connections[id]
+	go ClientRead(kvs,id,input_buffer)
+	go ClientWrite(kvs,id,input_buffer)
+	<-connection.finished
+	fmt.Println("done")
+	return
+
 } 
 
 func handleCommand(kvs *keyValueServer,input_buffer chan Request_){
 
 	for {
 		request := <- input_buffer
-		fmt.Println("Took request off channel", request.payload)
 
 		command := request.payload
 		id := request.id
@@ -186,32 +250,39 @@ func handleCommand(kvs *keyValueServer,input_buffer chan Request_){
 		switch command[0] {
 			case "Put":
 				val := []byte(command[2])
+				// fmt.Println("Put",command[1])
 				data = HandlePut(kvs,command[1],val)
 			case "Get":
+				// fmt.Println("Get",command[1])
 				data = HandleGet(kvs,command[1])
 			case "Delete":
+				// fmt.Println("delete",command[1])
 				data = HandleDelete(kvs,command[1])	
+			case "End":
+				fmt.Println(command)
+				data = nil
 			}
 		
-		response_buffer <- data
+		response := Response{command[1],data}
+		response_buffer <- response
 	}
 }
 
 func HandlePut(kvs *keyValueServer, key string,value []byte) []([]byte){
 
+	var v []([]byte) = make([]([]byte),0)
 	kvs.db.Put(key,value)
-	return nil
+	return v
 
 }
 
 func HandleGet(kvs *keyValueServer,key string) []([]byte){
-	
 	data := kvs.db.Get(key)
 	return data
 }
 
 func HandleDelete(kvs *keyValueServer,key string) []([]byte){
-
+	var v []([]byte) = make([]([]byte),0)
 	kvs.db.Clear(key)
-	return nil
+	return v
 }

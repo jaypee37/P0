@@ -3,7 +3,8 @@ package main
 import (
 	"fmt"
 	"net"
-	// "time"
+	"time"
+	"bufio"
 	
 )
 
@@ -18,7 +19,7 @@ const (
 // read and print out the server's echoed response to standard output. Whether or
 // not you add any code to this file will not affect your grade.
 
-func do(com string) {
+func do(c chan bool) {
 	conn, err := net.Dial("tcp", "localhost:9999")
 	if err != nil {
 		fmt.Println(err)
@@ -26,12 +27,50 @@ func do(com string) {
 
 
 	// bs :=[]byte(s)
-	fmt.Fprintf(conn, com)
+	// b := make([]byte,10)
+	
+	for i := 0; i < 50; i++ {
+		fmt.Println(i)
+
+
+
+		var s string = fmt.Sprintf("Put:Key_%d:val_%d\n",i,i)
+		_,err := conn.Write([]byte(s))
+
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+	for i := 0; i < 50; i++ {
+		fmt.Println(i)
+		var s string = fmt.Sprintf("Get:Key_%d\n",i)
+		_,err := conn.Write([]byte(s))
+
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+
+	time.Sleep(10000 * time.Millisecond)
+
+	scanner := bufio.NewScanner(conn)
+	scanner.Split(bufio.ScanLines)
+	for {
+		if ok := scanner.Scan(); !ok {
+			fmt.Println("broke")
+            break
+		}
+		fmt.Println(scanner.Text())
+	c <- true
+	
+	return
+	}
 }
 func main() {
-	var s string = "Put:Key:Hello\n"
-	var s_ string = "Get:Key\n"
-	do(s)
-	do(s_)
+	
+	c := make(chan bool)
+	go do(c)
+	<-c
+	return
 
 }
