@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/cmu440/p0partA"
 	"github.com/cmu440/p0partA/kvstore"
+	"time"
 )
 
 const defaultPort = 9999
@@ -25,6 +26,9 @@ func main() {
 	}
 
 	fmt.Printf("Started KeyValueServer on port %d...\n", defaultPort)
+	time.Sleep(5000 * time.Millisecond)
+	fmt.Println(server.CountActive())
+	
 
 	// Block forever.
 	select {}

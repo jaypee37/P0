@@ -70,6 +70,8 @@ func main() {
 	
 	c := make(chan bool)
 	go do(c)
+	go do(c)
+	<-c
 	<-c
 	return
 
